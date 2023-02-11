@@ -700,6 +700,19 @@ static inline void _Py_LeaveRecursiveCallPy(PyThreadState *tstate)  {
 #  pragma warning(disable:4102)
 #endif
 
+#define GOTO_UNBOUND_LOCAL_ERROR goto unbound_local_error
+#define GOTO_EXCEPTION_UNWIND goto exception_unwind
+#define GOTO_ERROR goto error
+#define GOTO_POP_1_ERROR goto pop_1_error
+#define GOTO_POP_2_ERROR goto pop_2_error
+#define GOTO_POP_3_ERROR goto pop_3_error
+#define GOTO_POP_4_ERROR goto pop_4_error
+#define GOTO_RESUME_FRAME goto resume_frame
+#define GOTO_RESUME_WITH_ERROR goto resume_with_error
+#define GOTO_HANDLE_EVAL_BREAKER goto handle_eval_breaker
+#define GOTO_EXIT_UNWIND goto exit_unwind
+#define pcframe  ((&cframe))
+
 PyObject* _Py_HOT_FUNCTION
 _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
 {
@@ -3079,3 +3092,6 @@ void Py_LeaveRecursiveCall(void)
 {
     _Py_LeaveRecursiveCall();
 }
+
+// HACK: just include the jit source code...
+#include "ceval_jit.c.h"

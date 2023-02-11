@@ -93,8 +93,8 @@
     { \
         NEXTOPARG(); \
         PRE_DISPATCH_GOTO(); \
-        assert(cframe.use_tracing == 0 || cframe.use_tracing == 255); \
-        opcode |= cframe.use_tracing OR_DTRACE_LINE; \
+        assert(pcframe->use_tracing == 0 || pcframe->use_tracing == 255); \
+        opcode |= pcframe->use_tracing OR_DTRACE_LINE; \
         DISPATCH_GOTO(); \
     }
 
@@ -102,7 +102,7 @@
     { \
         opcode = _Py_OPCODE(*next_instr); \
         PRE_DISPATCH_GOTO(); \
-        opcode |= cframe.use_tracing OR_DTRACE_LINE; \
+        opcode |= pcframe->use_tracing OR_DTRACE_LINE; \
         DISPATCH_GOTO(); \
     }
 
@@ -111,7 +111,7 @@
         _PyFrame_SetStackPointer(frame, stack_pointer); \
         frame->prev_instr = next_instr - 1;             \
         (NEW_FRAME)->previous = frame;                  \
-        frame = cframe.current_frame = (NEW_FRAME);     \
+        frame = pcframe->current_frame = (NEW_FRAME);     \
         CALL_STAT_INC(inlined_py_calls);                \
         goto start_frame;                               \
     } while (0)
@@ -183,7 +183,7 @@ GETITEM(PyObject *v, Py_ssize_t i) {
 #define PREDICT(op) \
     do { \
         _Py_CODEUNIT word = *next_instr; \
-        opcode = _Py_OPCODE(word) | cframe.use_tracing OR_DTRACE_LINE; \
+        opcode = _Py_OPCODE(word) | pcframe->use_tracing OR_DTRACE_LINE; \
         if (opcode == op) { \
             oparg = _Py_OPARG(word); \
             INSTRUCTION_START(op); \
@@ -286,10 +286,10 @@ GETITEM(PyObject *v, Py_ssize_t i) {
 /* Shared opcode macros */
 
 #define TRACE_FUNCTION_EXIT() \
-    if (cframe.use_tracing) { \
+    if (pcframe->use_tracing) { \
         if (trace_function_exit(tstate, frame, retval)) { \
             Py_DECREF(retval); \
-            goto exit_unwind; \
+            GOTO_EXIT_UNWIND; \
         } \
     }
 
@@ -299,14 +299,14 @@ GETITEM(PyObject *v, Py_ssize_t i) {
     }
 
 #define TRACE_FUNCTION_UNWIND()  \
-    if (cframe.use_tracing) { \
+    if (pcframe->use_tracing) { \
         /* Since we are already unwinding, \
          * we don't care if this raises */ \
         trace_function_exit(tstate, frame, NULL); \
     }
 
 #define TRACE_FUNCTION_ENTRY() \
-    if (cframe.use_tracing) { \
+    if (pcframe->use_tracing) { \
         _PyFrame_SetStackPointer(frame, stack_pointer); \
         int err = trace_function_entry(tstate, frame); \
         stack_pointer = _PyFrame_GetStackPointer(frame); \
@@ -316,7 +316,7 @@ GETITEM(PyObject *v, Py_ssize_t i) {
     }
 
 #define TRACE_FUNCTION_THROW_ENTRY() \
-    if (cframe.use_tracing) { \
+    if (pcframe->use_tracing) { \
         assert(frame->stacktop >= 0); \
         if (trace_function_entry(tstate, frame)) { \
             goto exit_unwind; \
