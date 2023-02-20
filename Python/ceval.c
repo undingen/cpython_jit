@@ -195,9 +195,9 @@ static void maybe_dtrace_line(_PyInterpreterFrame *, PyTraceInfo *, int);
 static void dtrace_function_entry(_PyInterpreterFrame *);
 static void dtrace_function_return(_PyInterpreterFrame *);
 
-static PyObject * import_name(PyThreadState *, _PyInterpreterFrame *,
+/*static*/ PyObject * import_name(PyThreadState *, _PyInterpreterFrame *,
                               PyObject *, PyObject *, PyObject *);
-static PyObject * import_from(PyThreadState *, PyObject *, PyObject *);
+/*static*/ PyObject * import_from(PyThreadState *, PyObject *, PyObject *);
 static void format_exc_check_arg(PyThreadState *, PyObject *, const char *, PyObject *);
 static void format_exc_unbound(PyThreadState *tstate, PyCodeObject *co, int oparg);
 static int check_args_iterable(PyThreadState *, PyObject *func, PyObject *vararg);
@@ -2685,7 +2685,7 @@ _PyEval_SliceIndexNotNone(PyObject *v, Py_ssize_t *pi)
     return 1;
 }
 
-static PyObject *
+/*static*/ PyObject *
 import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
             PyObject *name, PyObject *fromlist, PyObject *level)
 {
@@ -2727,7 +2727,7 @@ import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
     return res;
 }
 
-static PyObject *
+/*static*/ PyObject *
 import_from(PyThreadState *tstate, PyObject *v, PyObject *name)
 {
     PyObject *x;

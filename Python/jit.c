@@ -62,7 +62,9 @@
 #include "pycore_ceval.h"
 
 #include "pycore_code.h"
+#include "pycore_frame.h"
 #include "pycore_object.h"
+#include "pycore_opcode.h"
 #include "pycore_pyerrors.h"
 #include "pycore_pylifecycle.h"
 #include "pycore_pystate.h"
@@ -78,10 +80,14 @@
 
 //#include "../Objects/dict-common.h"
 
+#define INST_IDX_TO_LASTI_FACTOR 1
+
+#define PyObject_IsTrueProfile PyObject_IsTrue
+
 #define IS_IMMORTAL(x) (0)
 
 // enable runtime checks to catch jit compiler bugs
-//#define JIT_DEBUG 1
+#define JIT_DEBUG 1
 
 #if JIT_DEBUG
 #define DASM_CHECKS 1
@@ -275,8 +281,8 @@ PyObject* loadAttrCacheAttrNotFound(PyObject *owner, PyObject *name);
 int setItemSplitDictCache(PyObject* dict, Py_ssize_t splitdict_index, PyObject* v, PyObject* name);
 int setItemInitSplitDictCache(PyObject** dictptr, PyObject* obj, PyObject* v, Py_ssize_t splitdict_index,PyObject* name);
 
-PyObject * import_name(PyThreadState *, PyFrameObject *,
-                              PyObject *, PyObject *, PyObject *);
+PyObject *import_name(PyThreadState *, _PyInterpreterFrame *,
+                      PyObject *, PyObject *, PyObject *);
 PyObject * import_from(PyThreadState *, PyObject *, PyObject *);
 void format_exc_unbound(PyThreadState *tstate, PyCodeObject *co, int oparg);
 
@@ -310,7 +316,7 @@ static void decref_array4(PyObject** vec) {
 static void* __attribute__ ((const)) get_addr_of_helper_func(int opcode, int oparg) {
     switch (opcode) {
 #define JIT_HELPER_ADDR(name)   case name: return JIT_HELPER_##name
-        JIT_HELPER_ADDR(PRINT_EXPR);
+//        JIT_HELPER_ADDR(PRINT_EXPR);
         JIT_HELPER_ADDR(RAISE_VARARGS);
         JIT_HELPER_ADDR(GET_AITER);
         JIT_HELPER_ADDR(GET_ANEXT);
@@ -329,10 +335,9 @@ static void* __attribute__ ((const)) get_addr_of_helper_func(int opcode, int opa
         JIT_HELPER_ADDR(BUILD_MAP);
         JIT_HELPER_ADDR(SETUP_ANNOTATIONS);
         JIT_HELPER_ADDR(BUILD_CONST_KEY_MAP);
-        JIT_HELPER_ADDR(IMPORT_STAR);
+//        JIT_HELPER_ADDR(IMPORT_STAR);
         JIT_HELPER_ADDR(GET_YIELD_FROM_ITER);
         JIT_HELPER_ADDR(BEFORE_ASYNC_WITH);
-        JIT_HELPER_ADDR(SETUP_WITH);
         JIT_HELPER_ADDR(MAKE_FUNCTION);
         JIT_HELPER_ADDR(FORMAT_VALUE);
 
@@ -368,16 +373,19 @@ static void* __attribute__ ((const)) get_addr_of_helper_func(int opcode, int opa
 #endif
 
         case UNPACK_SEQUENCE:
+            abort();
+#if 0
             if (oparg == 2) return JIT_HELPER_UNPACK_SEQUENCE2;
             if (oparg == 3) return JIT_HELPER_UNPACK_SEQUENCE3;
             return JIT_HELPER_UNPACK_SEQUENCE;
-
+#endif
+/*
         case CALL_FUNCTION_EX:
             if (oparg == 0) return JIT_HELPER_CALL_FUNCTION_EX_NOKWARGS;
             if (oparg == 1) return JIT_HELPER_CALL_FUNCTION_EX_KWARGS;
             printf("could not find helper for opcode: %d oparg: %d\n", opcode, oparg);
             abort();
-
+*/
         default:
             printf("could not find helper for opcode: %d oparg: %d\n", opcode, oparg);
             abort();
@@ -392,7 +400,6 @@ static void* __attribute__ ((const)) get_addr_of_aot_func(int opcode, int oparg,
     #define OPCODE_PROFILE(x, func) OPCODE_STATIC(x, func)
     #define OPCODE_PROFILE_LITE(x, func) _OPCODE_PROFILE(x, func)
 
-    OPCODE_PROFILE(UNARY_POSITIVE, PyNumber_Positive);
     OPCODE_PROFILE(UNARY_NEGATIVE, PyNumber_Negative);
     OPCODE_PROFILE(UNARY_INVERT, PyNumber_Invert);
 
@@ -400,9 +407,9 @@ static void* __attribute__ ((const)) get_addr_of_aot_func(int opcode, int oparg,
 
     OPCODE_PROFILE(GET_ITER, PyObject_GetIter);
 
-    OPCODE_PROFILE_LITE(CALL_FUNCTION, call_function_ceval_no_kw);
-    OPCODE_PROFILE_LITE(CALL_METHOD, call_function_ceval_no_kw);
-    OPCODE_PROFILE(CALL_FUNCTION_KW, call_function_ceval_kw);
+//    OPCODE_PROFILE_LITE(CALL_FUNCTION, call_function_ceval_no_kw);
+//    OPCODE_PROFILE_LITE(CALL_METHOD, call_function_ceval_no_kw);
+//    OPCODE_PROFILE(CALL_FUNCTION_KW, call_function_ceval_kw);
 
     OPCODE_PROFILE(STORE_SUBSCR, PyObject_SetItem);
     OPCODE_PROFILE(BINARY_SUBSCR, PyObject_GetItem);
@@ -410,13 +417,16 @@ static void* __attribute__ ((const)) get_addr_of_aot_func(int opcode, int oparg,
 
     OPCODE_STATIC(LOAD_GLOBAL, JIT_HELPER_LOAD_GLOBAL);
     if (opcache_available) {
-        OPCODE_STATIC(LOAD_ATTR, JIT_HELPER_LOAD_ATTR_CACHED);
-        OPCODE_STATIC(STORE_ATTR, JIT_HELPER_STORE_ATTR_CACHED);
-        OPCODE_STATIC(LOAD_METHOD, JIT_HELPER_LOAD_METHOD_CACHED);
+        abort();
+        //OPCODE_STATIC(LOAD_ATTR, JIT_HELPER_LOAD_ATTR_CACHED);
+        //OPCODE_STATIC(STORE_ATTR, JIT_HELPER_STORE_ATTR_CACHED);
+        //OPCODE_STATIC(LOAD_METHOD, JIT_HELPER_LOAD_METHOD_CACHED);
     } else {
         OPCODE_STATIC(LOAD_ATTR, JIT_HELPER_LOAD_ATTR);
         OPCODE_STATIC(STORE_ATTR, JIT_HELPER_STORE_ATTR);
-        OPCODE_STATIC(LOAD_METHOD, JIT_HELPER_LOAD_METHOD);
+        if (opcode == LOAD_METHOD) // this should not trigger LOAD_METHOD is a pseudo opcode during codegen which gets removed
+            abort();
+        //OPCODE_STATIC(LOAD_METHOD, JIT_HELPER_LOAD_METHOD);
     }
 
     if (opcode == BINARY_OP) {
@@ -436,53 +446,25 @@ static const char* get_opcode_name(int opcode) {
 #define OPCODE_NAME(op) case op: return #op
     switch (opcode) {
         OPCODE_NAME(POP_TOP);
-        OPCODE_NAME(ROT_TWO);
-        OPCODE_NAME(ROT_THREE);
         OPCODE_NAME(NOP);
-        OPCODE_NAME(UNARY_POSITIVE);
+        OPCODE_NAME(CALL_INTRINSIC_1);
         OPCODE_NAME(UNARY_NEGATIVE);
         OPCODE_NAME(UNARY_NOT);
         OPCODE_NAME(UNARY_INVERT);
-        OPCODE_NAME(BINARY_MATRIX_MULTIPLY);
-        OPCODE_NAME(INPLACE_MATRIX_MULTIPLY);
-        OPCODE_NAME(BINARY_POWER);
-        OPCODE_NAME(BINARY_MULTIPLY);
-        OPCODE_NAME(BINARY_MODULO);
-        OPCODE_NAME(BINARY_ADD);
-        OPCODE_NAME(BINARY_SUBTRACT);
         OPCODE_NAME(BINARY_SUBSCR);
-        OPCODE_NAME(BINARY_FLOOR_DIVIDE);
-        OPCODE_NAME(BINARY_TRUE_DIVIDE);
-        OPCODE_NAME(INPLACE_FLOOR_DIVIDE);
-        OPCODE_NAME(INPLACE_TRUE_DIVIDE);
         OPCODE_NAME(GET_AITER);
         OPCODE_NAME(GET_ANEXT);
         OPCODE_NAME(BEFORE_ASYNC_WITH);
-        OPCODE_NAME(INPLACE_ADD);
-        OPCODE_NAME(INPLACE_SUBTRACT);
-        OPCODE_NAME(INPLACE_MULTIPLY);
-        OPCODE_NAME(INPLACE_MODULO);
         OPCODE_NAME(STORE_SUBSCR);
         OPCODE_NAME(DELETE_SUBSCR);
-        OPCODE_NAME(BINARY_LSHIFT);
-        OPCODE_NAME(BINARY_RSHIFT);
-        OPCODE_NAME(BINARY_AND);
-        OPCODE_NAME(BINARY_XOR);
-        OPCODE_NAME(BINARY_OR);
-        OPCODE_NAME(INPLACE_POWER);
         OPCODE_NAME(GET_ITER);
         OPCODE_NAME(GET_YIELD_FROM_ITER);
-        OPCODE_NAME(PRINT_EXPR);
+//        OPCODE_NAME(PRINT_EXPR);
         OPCODE_NAME(LOAD_BUILD_CLASS);
         OPCODE_NAME(SEND);
         OPCODE_NAME(GET_AWAITABLE);
-        OPCODE_NAME(INPLACE_LSHIFT);
-        OPCODE_NAME(INPLACE_RSHIFT);
-        OPCODE_NAME(INPLACE_AND);
-        OPCODE_NAME(INPLACE_XOR);
-        OPCODE_NAME(INPLACE_OR);
         OPCODE_NAME(RETURN_VALUE);
-        OPCODE_NAME(IMPORT_STAR);
+//        OPCODE_NAME(IMPORT_STAR);
         OPCODE_NAME(SETUP_ANNOTATIONS);
         OPCODE_NAME(YIELD_VALUE);
         OPCODE_NAME(POP_BLOCK);
@@ -509,7 +491,7 @@ static const char* get_opcode_name(int opcode) {
         OPCODE_NAME(JUMP_FORWARD);
         OPCODE_NAME(JUMP_IF_FALSE_OR_POP);
         OPCODE_NAME(JUMP_IF_TRUE_OR_POP);
-        OPCODE_NAME(JUMP_ABSOLUTE);
+        OPCODE_NAME(JUMP_NO_INTERRUPT);
         OPCODE_NAME(POP_JUMP_IF_FALSE);
         OPCODE_NAME(POP_JUMP_IF_TRUE);
         OPCODE_NAME(LOAD_GLOBAL);
@@ -518,28 +500,26 @@ static const char* get_opcode_name(int opcode) {
         OPCODE_NAME(STORE_FAST);
         OPCODE_NAME(DELETE_FAST);
         OPCODE_NAME(RAISE_VARARGS);
-        OPCODE_NAME(CALL_FUNCTION);
+//        OPCODE_NAME(CALL_FUNCTION);
         OPCODE_NAME(MAKE_FUNCTION);
         OPCODE_NAME(BUILD_SLICE);
         OPCODE_NAME(LOAD_CLOSURE);
         OPCODE_NAME(LOAD_DEREF);
         OPCODE_NAME(STORE_DEREF);
         OPCODE_NAME(DELETE_DEREF);
-        OPCODE_NAME(CALL_FUNCTION_KW);
-        OPCODE_NAME(CALL_FUNCTION_EX);
-        OPCODE_NAME(SETUP_WITH);
+//        OPCODE_NAME(CALL_FUNCTION_KW);
+//       OPCODE_NAME(CALL_FUNCTION_EX);
         OPCODE_NAME(EXTENDED_ARG);
         OPCODE_NAME(LIST_APPEND);
         OPCODE_NAME(SET_ADD);
         OPCODE_NAME(MAP_ADD);
         OPCODE_NAME(LOAD_CLASSDEREF);
-        OPCODE_NAME(SETUP_ASYNC_WITH);
         OPCODE_NAME(FORMAT_VALUE);
         OPCODE_NAME(BUILD_CONST_KEY_MAP);
         OPCODE_NAME(BUILD_STRING);
 
-        OPCODE_NAME(LOAD_METHOD);
-        OPCODE_NAME(CALL_METHOD);
+//        OPCODE_NAME(LOAD_METHOD);
+//        OPCODE_NAME(CALL_METHOD);
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
         OPCODE_NAME(CONTINUE_LOOP);
@@ -553,7 +533,6 @@ static const char* get_opcode_name(int opcode) {
 #endif
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 8
-        OPCODE_NAME(ROT_FOUR);
         OPCODE_NAME(END_ASYNC_FOR);
 #endif
 
@@ -574,9 +553,8 @@ static const char* get_opcode_name(int opcode) {
         OPCODE_NAME(DICT_MERGE);
         OPCODE_NAME(DICT_UPDATE);
         OPCODE_NAME(IS_OP);
-        OPCODE_NAME(JUMP_IF_NOT_EXC_MATCH);
+        OPCODE_NAME(CHECK_EXC_MATCH);
         OPCODE_NAME(LIST_EXTEND);
-        OPCODE_NAME(LIST_TO_TUPLE);
         OPCODE_NAME(LOAD_ASSERTION_ERROR);
         OPCODE_NAME(RERAISE);
         OPCODE_NAME(SET_UPDATE);
@@ -584,14 +562,11 @@ static const char* get_opcode_name(int opcode) {
 #endif
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
-        OPCODE_NAME(GEN_START);
         OPCODE_NAME(GET_LEN);
         OPCODE_NAME(MATCH_CLASS);
         OPCODE_NAME(MATCH_MAPPING);
         OPCODE_NAME(MATCH_SEQUENCE);
         OPCODE_NAME(MATCH_KEYS);
-        OPCODE_NAME(COPY_DICT_WITHOUT_KEYS);
-        OPCODE_NAME(ROT_N);
 #endif
     };
 #undef OPCODE_NAME
@@ -627,14 +602,11 @@ static char* calculate_jmp_targets(Jit* Dst) {
         oldoparg = 0;
 
         switch (opcode) {
-            case JUMP_ABSOLUTE:
+            case JUMP_NO_INTERRUPT:
             case POP_JUMP_IF_FALSE:
             case POP_JUMP_IF_TRUE:
             case JUMP_IF_FALSE_OR_POP:
             case JUMP_IF_TRUE_OR_POP:
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 9
-            case JUMP_IF_NOT_EXC_MATCH:
-#endif
                 is_jmp_target[oparg/INST_IDX_TO_LASTI_FACTOR] = 1;
                 break;
 
@@ -663,15 +635,10 @@ static char* calculate_jmp_targets(Jit* Dst) {
 #endif
 
             // this opcodes use PyFrame_BlockSetup which is similar to a jump in case of exception
-            case SETUP_ASYNC_WITH:
+            case BEFORE_WITH:
+                abort();
             case SETUP_FINALLY:
-            case SETUP_WITH:
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
-            case SETUP_LOOP:
-            case SETUP_EXCEPT:
-#endif
-                is_jmp_target[inst_idx + 1] = 1;
-                is_jmp_target[oparg/INST_IDX_TO_LASTI_FACTOR + inst_idx + 1] = 1;
+                abort();
                 break;
 
             case SEND:
@@ -1644,7 +1611,7 @@ static void emit_jmp_to_inst_idx(Jit* Dst, int r_idx) {
     | branch_reg tmp_idx
 }
 
-#if JIT_DEBUG
+#if 0 && JIT_DEBUG
 static void debug_error_not_a_jump_target(PyFrameObject* f, int* is_jmp_target, int num_entries) {
     fprintf(stderr, "ERROR: jit entry points to the instruction after f->f_lasti %d which is not a jump target ", f->f_lasti + INST_IDX_TO_LASTI_FACTOR);
     fprintf(stderr, "in %s:%d %s\n", PyUnicode_AsUTF8(f->f_code->co_filename), f->f_code->co_firstlineno, PyUnicode_AsUTF8(f->f_code->co_name));
@@ -1658,7 +1625,7 @@ static void debug_error_not_a_jump_target(PyFrameObject* f, int* is_jmp_target, 
 #endif
 
 static int get_fastlocal_offset(int fastlocal_idx) {
-    return offsetof(PyFrameObject, f_localsplus) + fastlocal_idx * 8;
+    return offsetof(_PyInterpreterFrame, localsplus) + fastlocal_idx * 8;
 }
 
 // this does the same as: r = freevars[num]
@@ -1668,6 +1635,8 @@ static void emit_load_freevar(Jit* Dst, int r_idx, int num) {
 }
 
 static void emit_call_eval_frame_handle_pending(Jit* Dst, int preserve_res) {
+    abort();
+#if 0
     if (preserve_res) {
         // we have to preserve res because it's used by our deferred stack optimizations
         | mov tmp_preserved_reg, res
@@ -1684,6 +1653,7 @@ static void emit_call_eval_frame_handle_pending(Jit* Dst, int preserve_res) {
     } else {
         | branch_ne ->error
     }
+#endif
 }
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION <= 9
@@ -1715,17 +1685,22 @@ static void emit_tracing_possible_check(Jit* Dst) {
 // compares trace_info->cframe.use_tracing == 0 (32bit)
 // Always emits instructions using the same number of bytes.
 static void emit_use_tracing_check(Jit* Dst) {
+    // TODO: add tracing checks
+#if 0
 @ARM// insts are 2*4=8 bytes long
 @ARM| ldr Rw(tmp_idx), [trace_info, #offsetof(PyTraceInfo, cframe.use_tracing)]
 @ARM| cmp Rw(tmp_idx), wzr
 
 @X86| cmp dword [trace_info+offsetof(PyTraceInfo, cframe.use_tracing)], 0 // inst is 3 bytes long
+#endif
 }
 
 // the eval breaker should not be generated for all instructions
 static int should_emit_eval_breaker_check(Jit* Dst, int next_inst_idx) {
-    int opcode = _Py_OPCODE(Dst->first_instr[next_inst_idx]);
-    return OPCODE_SUPPORTS_EVAL_CHECK(opcode) ? 1 : 0;
+// TODO: implement me
+    return 0;
+//    int opcode = _Py_OPCODE(Dst->first_instr[next_inst_idx]);
+//    return OPCODE_SUPPORTS_EVAL_CHECK(opcode) ? 1 : 0;
 }
 
 static void emit_eval_breaker_check(Jit* Dst) {
@@ -1744,6 +1719,8 @@ static void emit_eval_breaker_check(Jit* Dst) {
 // emits: d->f_lasti = val
 // Always emits instructions using the same number of bytes.
 static void emit_update_f_lasti(Jit* Dst, long val) {
+    //TODO: replace f_lasti update with changing the address of the next opcode...
+#if 0
     int can_encode = 1;
 @ARMif (val >= 32768) can_encode = 0;
 @X86if (!IS_32BIT_VAL(val)) can_encode = 0;
@@ -1761,6 +1738,7 @@ static void emit_update_f_lasti(Jit* Dst, long val) {
 
 @X86// inst is 8 bytes long
 @X86| mov dword [f + offsetof(PyFrameObject, f_lasti)], val
+#endif
 }
 
 //////////////////////////////////////////////////////////////
@@ -2271,13 +2249,15 @@ static void emit_set_why(Jit* Dst, enum why_code why) {
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
 void emit_set_f_state(Jit* Dst, int value) {
-    _Static_assert(sizeof(((PyFrameObject*)0)->f_state) == 1, "");
-    emit_store8_mem_imm(Dst, value, f_idx, offsetof(PyFrameObject, f_state));
+    abort();
+    //_Static_assert(sizeof(((PyFrameObject*)0)->f_state) == 1, "");
+    //emit_store8_mem_imm(Dst, value, f_idx, offsetof(PyFrameObject, f_state));
 }
 
 void emit_set_f_stackdepth(Jit* Dst, int value) {
-    _Static_assert(sizeof(((PyFrameObject*)0)->f_stackdepth) == 4, "");
-    emit_store32_mem_imm(Dst, value, f_idx, offsetof(PyFrameObject, f_stackdepth));
+    abort();
+    //_Static_assert(sizeof(((PyFrameObject*)0)->f_stackdepth) == 4, "");
+    //emit_store32_mem_imm(Dst, value, f_idx, offsetof(PyFrameObject, f_stackdepth));
 }
 #endif
 
@@ -2326,6 +2306,8 @@ static void emit_convert_res32_to_pybool(Jit* Dst, int invert) {
 
 
 static _PyOpcache* get_opcache_entry(Jit* Dst, int inst_idx) {
+    return 0;
+/*
     OpCache* opcache = Dst->opcache;
     _PyOpcache* co_opcache = NULL;
     if (inst_idx + 1 >= Dst->num_opcodes) {
@@ -2342,10 +2324,13 @@ static _PyOpcache* get_opcache_entry(Jit* Dst, int inst_idx) {
         }
     }
     return co_opcache;
+*/
 }
 
 // returns 0 if generation succeeded
 static int emit_special_binary_subscr(Jit* Dst, int inst_idx, PyObject* const_val, RefStatus ref_status[2]) {
+    abort();
+#if 0
     if (!const_val || !PyLong_CheckExact(const_val)) {
         return -1;
     }
@@ -2401,6 +2386,7 @@ static int emit_special_binary_subscr(Jit* Dst, int inst_idx, PyObject* const_va
     deferred_vs_push(Dst, REGISTER, res_idx);
     ++jit_stat_getitemlong;
     return 0;
+#endif
 }
 
 // returns 0 if generation succeeded
@@ -2532,6 +2518,8 @@ static int emit_inline_cache_loadattr_supported(_PyOpcache *co_opcache, _PyOpcac
 }
 
 static void emit_inline_cache_loadattr_entry(Jit* Dst, int opcode, int oparg, _PyOpcache_LoadAttr *la, int* emit_load_attr_res_0_helper) {
+    abort();
+#if 0
     int version_zero = emit_inline_cache_loadattr_is_version_zero(la);
 
     if (la->cache_type == LA_CACHE_BUILTIN) {
@@ -2732,12 +2720,15 @@ static void emit_inline_cache_loadattr_entry(Jit* Dst, int opcode, int oparg, _P
         *emit_load_attr_res_0_helper = 1; // makes sure we emit label 3
         emit_incref(Dst, res_idx);
     }
+#endif
 }
 
 // special inplace modification code for float math functions
 // can modify either the left or right operand
 // returns 0 if generation succeeded
 static int emit_special_binary_op_inplace(Jit* Dst, int inst_idx, int opcode, int oparg, RefStatus ref_status_left, RefStatus ref_status_right, int load_store_left_idx, PyObject* const_right_val) {
+    abort();
+#if 0
     switch (opcode) {
         case BINARY_ADD:
         case BINARY_SUBTRACT:
@@ -2858,6 +2849,7 @@ static int emit_special_binary_op_inplace(Jit* Dst, int inst_idx, int opcode, in
 
     deferred_vs_push(Dst, REGISTER, res_idx);
     return 0;
+#endif
 }
 
 // Same signature as PyUnicode_Append
@@ -2879,6 +2871,8 @@ static void list_append(PyObject **pleft, PyObject *right) {
 // only supports modifying the left operand inplace.
 // returns 0 if generation succeeded
 static int emit_special_concat_inplace(Jit* Dst, int inst_idx, int opcode, int oparg, RefStatus ref_status_left, RefStatus ref_status_right, int load_store_left_idx, PyObject* const_right_val) {
+    abort();
+#if 0
     if (opcode != BINARY_ADD && opcode != INPLACE_ADD) {
         return -1;
     }
@@ -2980,10 +2974,13 @@ static int emit_special_concat_inplace(Jit* Dst, int inst_idx, int opcode, int o
 
     deferred_vs_push(Dst, REGISTER, res_idx);
     return 0;
+#endif
 }
 
 // returns 0 if IC generation succeeded
 static int emit_inline_cache(Jit* Dst, int opcode, int oparg, _PyOpcache* co_opcache) {
+    return 1;
+#if 0
     if (co_opcache == NULL || !jit_use_ics)
         return 1;
 
@@ -3007,10 +3004,10 @@ static int emit_inline_cache(Jit* Dst, int opcode, int oparg, _PyOpcache* co_opc
 
             deferred_vs_convert_reg_to_stack(Dst);
 
-            emit_load64_mem(Dst, arg3_idx, f_idx, offsetof(PyFrameObject, f_globals));
+            emit_load64_mem(Dst, arg3_idx, f_idx, offsetof(_PyInterpreterFrame, f_globals));
             if (opcode == LOAD_NAME) {
                 // if f_globals != f_locals we have to call the LOAD_NAME helper else we call LOAD_GLOBAL
-                emit_load64_mem(Dst, arg2_idx, f_idx, offsetof(PyFrameObject, f_locals));
+                emit_load64_mem(Dst, arg2_idx, f_idx, offsetof(_PyInterpreterFrame, f_locals));
                 | cmp arg3, arg2
                 | branch_ne >2
 
@@ -3039,7 +3036,7 @@ static int emit_inline_cache(Jit* Dst, int opcode, int oparg, _PyOpcache* co_opc
                 emit_cmp64_mem_imm(Dst, arg3_idx, offsetof(PyDictObject, ma_version_tag), (uint64_t)lg->u.builtin_cache.globals_ver);
                 | branch_ne >1
 
-                emit_load64_mem(Dst, arg3_idx, f_idx, offsetof(PyFrameObject, f_builtins));
+                emit_load64_mem(Dst, arg3_idx, f_idx, offsetof(_PyInterpreterFrame, f_builtins));
                 emit_cmp64_mem_imm(Dst, arg3_idx, offsetof(PyDictObject, ma_version_tag), (uint64_t)lg->u.builtin_cache.builtins_ver);
                 | branch_ne >1
 
@@ -3374,6 +3371,7 @@ static int emit_inline_cache(Jit* Dst, int opcode, int oparg, _PyOpcache* co_opc
         }
     }
     return 1;
+#endif
 }
 
 static void emit_instr_start(Jit* Dst, int inst_idx, int opcode, int oparg) {
@@ -3402,11 +3400,6 @@ static void emit_instr_start(Jit* Dst, int inst_idx, int opcode, int oparg) {
                 break; // we have to generate a trace check
 #endif
         case EXTENDED_ARG:
-        case ROT_TWO:
-        case ROT_THREE:
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 8
-        case ROT_FOUR:
-#endif
         case POP_TOP:
         case LOAD_CLOSURE:
         case LOAD_CONST:
@@ -3453,10 +3446,14 @@ static void emit_instr_start(Jit* Dst, int inst_idx, int opcode, int oparg) {
     switch (opcode) {
     // cpython does not do signal checks for the following opcodes
     // so only generate a trace check for this else test_generators.py will fail
+    case BEFORE_WITH:
+        abort();
     case SETUP_FINALLY:
-    case SETUP_WITH:
+        abort();
+    case SEND:
+        abort();
     case BEFORE_ASYNC_WITH:
-    case YIELD_FROM:
+
         // compares ceval->tracing_possible == 0 (32bit)
         emit_tracing_possible_check(Dst);
 
@@ -3569,6 +3566,21 @@ static void emit_instr_start(Jit* Dst, int inst_idx, int opcode, int oparg) {
 |.globals lbl_
 |.actionlist bf_actions
 
+
+static int calculate_num_opcodes(PyCodeObject* co) {
+    int num = 0;
+    _Py_CODEUNIT *instructions = _PyCode_CODE(co);
+    for (int i = 0; i < Py_SIZE(co); i++) {
+        int opcode = _PyOpcode_Deopt[_Py_OPCODE(instructions[i])];
+        int caches = _PyOpcode_Caches[opcode];
+        if (caches) {
+            i += caches;
+            continue;
+        }
+    }
+    return num;
+}
+
 #if JIT_DEBUG
 __attribute__((optimize("-O0"))) // enable to make "source tools/dis_jit_gdb.py" work
 #endif
@@ -3594,10 +3606,11 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
     jit.co_names = co->co_names;
     jit.current_section = -1;
 
-    jit.opcache = _PyCode_GetOpcache(co);
+    //jit.opcache = _PyCode_GetOpcache(co);
 
-    jit.num_opcodes = PyBytes_Size(co->co_code)/sizeof(_Py_CODEUNIT);
-    jit.first_instr = (_Py_CODEUNIT *)PyBytes_AS_STRING(co->co_code);
+    jit.num_opcodes = calculate_num_opcodes(co);
+    // TODO: not sure if this is correct
+    jit.first_instr = (_Py_CODEUNIT *) _PyCode_CODE(co) + co->_co_firsttraceable;
 
     Jit* Dst = &jit;
     dasm_init(Dst, DASM_MAXSECTION);
@@ -3678,7 +3691,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             oldoparg = oparg << 8;
             break;
 
-        case JUMP_ABSOLUTE:
+        case JUMP_NO_INTERRUPT:
             deferred_vs_apply(Dst);
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
             if (should_emit_eval_breaker_check(Dst, oparg)) {
@@ -3778,39 +3791,6 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             break;
         }
 
-        case ROT_TWO:
-            if (Dst->deferred_vs_next >= 2) {
-                DeferredValueStackEntry tmp[2];
-                memcpy(tmp, &GET_DEFERRED[-2], sizeof(tmp));
-                GET_DEFERRED[-1] = tmp[0];
-                GET_DEFERRED[-2] = tmp[1];
-            } else {
-                deferred_vs_apply(Dst);
-                emit_read_vs(Dst, arg1_idx, 1 /*=top*/);
-                emit_read_vs(Dst, res_idx, 2 /*=second*/);
-                emit_write_vs(Dst, arg1_idx, 2 /*=second*/);
-                emit_write_vs(Dst, res_idx, 1 /*=top*/);
-            }
-            break;
-
-        case ROT_THREE:
-            if (Dst->deferred_vs_next >= 3) {
-                DeferredValueStackEntry tmp[3];
-                memcpy(tmp, &GET_DEFERRED[-3], sizeof(tmp));
-                GET_DEFERRED[-1] = tmp[1];
-                GET_DEFERRED[-2] = tmp[0];
-                GET_DEFERRED[-3] = tmp[2];
-            } else {
-                deferred_vs_apply(Dst);
-                emit_read_vs(Dst, arg1_idx, 1 /*=top*/);
-                emit_read_vs(Dst, res_idx, 2 /*=second*/);
-                emit_read_vs(Dst, arg3_idx, 3 /*=third*/);
-                emit_write_vs(Dst, arg3_idx, 2 /*=second*/);
-                emit_write_vs(Dst, arg1_idx, 3 /*=third*/);
-                emit_write_vs(Dst, res_idx, 1 /*=top*/);
-            }
-            break;
-
         case RETURN_VALUE:
             deferred_vs_pop1_owned(Dst, res_idx);
             deferred_vs_apply(Dst);
@@ -3818,7 +3798,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             emit_set_why(Dst, WHY_RETURN);
 #elif PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
             // f->f_state = FRAME_RETURNED;
-            emit_set_f_state(Dst, FRAME_RETURNED);
+            //emit_set_f_state(Dst, FRAME_RETURNED);
             // f->f_stackdepth = 0;
             emit_set_f_stackdepth(Dst, 0);
 #endif
@@ -3826,33 +3806,9 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             | branch ->return
             break;
 
-        case BINARY_MULTIPLY:
-        case BINARY_MATRIX_MULTIPLY:
-        case BINARY_TRUE_DIVIDE:
-        case BINARY_FLOOR_DIVIDE:
-        case BINARY_MODULO: // TODO: add special handling like in the interp
-        case BINARY_ADD:
-        case BINARY_SUBTRACT:
-        case BINARY_LSHIFT:
-        case BINARY_RSHIFT:
-        case BINARY_AND:
-        case BINARY_XOR:
-        case BINARY_OR:
-        case BINARY_POWER:
 
-        case INPLACE_MULTIPLY:
-        case INPLACE_MATRIX_MULTIPLY:
-        case INPLACE_TRUE_DIVIDE:
-        case INPLACE_FLOOR_DIVIDE:
-        case INPLACE_MODULO:
-        case INPLACE_ADD:
-        case INPLACE_SUBTRACT:
-        case INPLACE_LSHIFT:
-        case INPLACE_RSHIFT:
-        case INPLACE_AND:
-        case INPLACE_XOR:
-        case INPLACE_OR:
-        case INPLACE_POWER:
+        case BINARY_OP:
+            abort();
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION <= 8
         case COMPARE_OP:
@@ -3940,6 +3896,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             emit_decref(Dst, arg1_idx, 0 /*= don't preserve res */);
             break;
 
+#if 0
         case CALL_FUNCTION:
         case CALL_FUNCTION_KW:
         case CALL_METHOD:
@@ -4153,8 +4110,11 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             }
 #endif
             break;
+#endif
 
         case FOR_ITER:
+            abort();
+#if 0
             deferred_vs_peek_top_and_apply(Dst, arg1_idx);
             emit_load64_mem(Dst, tmp_idx, arg1_idx, offsetof(PyObject, ob_type));
             emit_indirect_call(Dst, tmp_idx, offsetof(PyTypeObject, tp_iternext), 0 /*don't ignore ret value*/);
@@ -4170,22 +4130,22 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             switch_section(Dst, SECTION_CODE);
 
             deferred_vs_push(Dst, REGISTER, res_idx);
+#endif
             break;
 
-        case UNARY_POSITIVE:
+        case CALL:
+        case CALL_INTRINSIC_1:
+            abort();
         case UNARY_NEGATIVE:
         case UNARY_NOT:
         case UNARY_INVERT:
         case GET_ITER:
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 9
-        case LIST_TO_TUPLE:
-#endif
         {
             RefStatus ref_status = deferred_vs_pop1(Dst, arg1_idx);
             deferred_vs_convert_reg_to_stack(Dst);
             void* func = NULL;
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 9
-            if (opcode == LIST_TO_TUPLE) {
+            if (/*opcode == LIST_TO_TUPLE*/0) {
                 func = PyList_AsTuple;
             } else {
                 func = get_aot_func_addr(Dst, opcode, oparg, 0 /*= no op cache */);
@@ -4384,7 +4344,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
         {
             RefStatus ref_status = deferred_vs_pop1(Dst, arg3_idx);
             deferred_vs_convert_reg_to_stack(Dst);
-            emit_load64_mem(Dst, arg1_idx, f_idx, offsetof(PyFrameObject, f_globals));
+            emit_load64_mem(Dst, arg1_idx, f_idx, offsetof(_PyInterpreterFrame, f_globals));
             emit_mov_imm(Dst, arg2_idx, (unsigned long)PyTuple_GET_ITEM(Dst->co_names, oparg));
             emit_call_decref_args1(Dst, PyDict_SetItem, arg3_idx, &ref_status);
             emit_if_res_32b_not_0_error(Dst);
@@ -4392,6 +4352,8 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
         }
 
         case BUILD_SLICE:
+            abort();
+#if 0
             if (oparg == 3) {
                 deferred_vs_pop3_owned(Dst, arg3_idx, arg2_idx, arg1_idx);
             } else {
@@ -4405,6 +4367,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             emit_call_ext_func(Dst, PySlice_NewSteal);
             emit_if_res_0_error(Dst);
             deferred_vs_push(Dst, REGISTER, res_idx);
+#endif
             break;
 
         case BUILD_TUPLE:
@@ -4421,7 +4384,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
         case BUILD_LIST:
             deferred_vs_convert_reg_to_stack(Dst);
             emit_mov_imm(Dst, arg1_idx, oparg);
-#ifdef PYSTON_LITE
+#if 1 || defined(PYSTON_LITE)
             emit_call_ext_func(Dst, opcode == BUILD_LIST ? PyList_New : PyTuple_New);
 #else
             emit_call_ext_func(Dst, opcode == BUILD_LIST ? PyList_New : PyTuple_New_Nonzeroed);
@@ -4471,6 +4434,8 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
 
         case LOAD_DEREF:
         case DELETE_DEREF:
+            abort();
+#if 0
             deferred_vs_convert_reg_to_stack(Dst);
             // PyObject *cell = freevars[oparg];
             emit_load_freevar(Dst, arg1_idx, oparg);
@@ -4504,60 +4469,16 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 emit_decref(Dst, res_idx, 0 /*= don't preserve res */);
             }
             break;
+#endif
 
+        case BEFORE_WITH:
+            abort();
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
         case SETUP_LOOP:
         case SETUP_EXCEPT:
 #endif
         case SETUP_FINALLY:
-        case SETUP_ASYNC_WITH:
-            deferred_vs_apply(Dst);
-            // PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + oparg, STACK_LEVEL());
-            | mov arg1, f
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
-            if (opcode == SETUP_LOOP || opcode == SETUP_EXCEPT) {
-                emit_mov_imm(Dst, arg2_idx, opcode);
-            } else {
-#else
-            {
-#endif
-                emit_mov_imm(Dst, arg2_idx, SETUP_FINALLY);
-            }
-            emit_mov_imm(Dst, arg3_idx, (inst_idx + 1) * INST_IDX_TO_LASTI_FACTOR + oparg);
-            // STACK_LEVEL()
-@ARM_START
-            int src_idx = vsp_idx;
-            if (opcode == SETUP_ASYNC_WITH) {
-                | sub arg4, vsp, #8
-                src_idx = arg4_idx;
-            }
-            | ldr tmp, [f, #offsetof(PyFrameObject, f_valuestack)]
-            | sub arg4, Rx(src_idx), tmp
-            | asr arg4, arg4, #3
-@ARM_END
-@X86_START
-            if (opcode == SETUP_ASYNC_WITH) {
-                // the interpreter pops the top value and pushes it afterwards
-                // we instead just calculate the stack level with the vsp minus one value.
-                | lea arg4, [vsp - 8]
-            } else {
-                | mov arg4, vsp
-            }
-            | sub arg4, [f + offsetof(PyFrameObject, f_valuestack)]
-            | sar arg4, 3 // divide by 8 = sizeof(void*)
-@X86_END
-            emit_call_ext_func(Dst, PyFrame_BlockSetup);
-            break;
-
-        case POP_BLOCK:
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
-            deferred_vs_apply(Dst);
-            emit_call_ext_func(Dst, JIT_HELPER_POP_BLOCK37);
-#else
-            deferred_vs_convert_reg_to_stack(Dst);
-            | mov arg1, f
-            emit_call_ext_func(Dst, PyFrame_BlockPop);
-#endif
+            abort();
             break;
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 8
@@ -4572,6 +4493,8 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
 #endif
 
         case YIELD_VALUE:
+            abort();
+#if 0
             if (co->co_flags & CO_ASYNC_GENERATOR) {
                 RefStatus ref_status = deferred_vs_pop1(Dst, arg1_idx);
                 deferred_vs_apply(Dst);
@@ -4604,6 +4527,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 emit_exit_yielding_label(Dst);
                 exit_yielding_label = 1;
             }
+#endif
             break;
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION == 7
@@ -4665,7 +4589,8 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             break;
         }
 
-        case JUMP_IF_NOT_EXC_MATCH: {
+        case CHECK_EXC_MATCH: {
+/*
             RefStatus ref_status[2];
             deferred_vs_pop2(Dst, arg2_idx, arg1_idx, ref_status);
             deferred_vs_convert_reg_to_stack(Dst);
@@ -4674,11 +4599,15 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             emit_je_to_bytecode_n(Dst, oparg);
             | branch_lt ->error
             break;
+*/
+            abort();
         }
 
         case DICT_MERGE:
         case DICT_UPDATE:
         case LIST_EXTEND: {
+            abort();
+#if 0
             RefStatus ref_status = deferred_vs_pop1(Dst, arg2_idx);
             deferred_vs_peek(Dst, arg1_idx, oparg);
             deferred_vs_convert_reg_to_stack(Dst);
@@ -4738,10 +4667,13 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 | branch ->error
                 switch_section(Dst, SECTION_CODE);
             }
+#endif
             break;
         }
 
         case RERAISE:
+            abort();
+#if 0
             deferred_vs_pop3_owned(Dst, arg2_idx, arg3_idx, arg4_idx);
             deferred_vs_apply(Dst);
 
@@ -4762,18 +4694,6 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             | branch ->exception_unwind
             break;
 #endif
-
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
-        case GEN_START: {
-            RefStatus ref_status = deferred_vs_pop1(Dst, arg1_idx);
-            // interpreter asserts that the object is always 'None'
-            // which means if it's immortal we could avoid the decref.
-            if (ref_status == OWNED) {
-                deferred_vs_convert_reg_to_stack(Dst);
-                emit_decref(Dst, arg1_idx, 0 /*= don't preserve res */);
-            }
-            break;
-        }
 #endif
 
         default:
@@ -4796,16 +4716,16 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             switch (opcode) {
                 // ### ONE PYTHON ARGS ###
                 // JIT_HELPER1
-                case PRINT_EXPR:
+//                case PRINT_EXPR:
                 case GET_AITER:
                 case GET_AWAITABLE:
-                case YIELD_FROM:
+                case SEND: // TODO not sure
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 8
                 case END_ASYNC_FOR:
 #endif
                 case UNPACK_SEQUENCE:
                 case UNPACK_EX:
-                case IMPORT_STAR:
+//                case IMPORT_STAR:
                 case GET_YIELD_FROM_ITER:
                 // JIT_HELPER_WITH_NAME1
                 case STORE_NAME:
@@ -4826,6 +4746,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                     break;
 
                 // ### TWO OR THREE PYTHON ARGS ###
+/*
                 case CALL_FUNCTION_EX:
                     if (oparg & 1) {
                         deferred_vs_pop3_owned(Dst, arg2_idx, arg3_idx, arg4_idx);
@@ -4833,6 +4754,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                         deferred_vs_pop2_owned(Dst, arg2_idx, arg3_idx);
                     }
                     break;
+*/
 
                  // ### ONE PYTHON ARG PEEKED ###
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
@@ -4852,7 +4774,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
             switch (opcode) {
                 // the following opcodes don't access the python value stack (no PUSH, POP etc)
                 // which means we don't need to create it we just have to spill the 'res' reg if it's used
-                case PRINT_EXPR:
+//                case PRINT_EXPR:
                 case GET_AITER:
                 case GET_AWAITABLE:
                 case LOAD_BUILD_CLASS:
@@ -4865,9 +4787,9 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 case LOAD_CLASSDEREF:
                 case SETUP_ANNOTATIONS:
                 case LOAD_ATTR:
-                case IMPORT_STAR:
+//                case IMPORT_STAR:
                 case GET_YIELD_FROM_ITER:
-                case CALL_FUNCTION_EX:
+//                case CALL_FUNCTION_EX:
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
                 case GET_LEN:
@@ -4908,8 +4830,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 case BUILD_SET:
                 case BUILD_MAP:
                 case BUILD_CONST_KEY_MAP:
-                case SETUP_WITH:
-                case CALL_FUNCTION_EX:
+//                case CALL_FUNCTION_EX:
                 case MAKE_FUNCTION:
                 case FORMAT_VALUE:
 
@@ -4928,7 +4849,6 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
                 case MATCH_CLASS:
-                case ROT_N:
 #endif
 
                     emit_mov_imm(Dst, arg1_idx, oparg);
@@ -4975,7 +4895,8 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 // this opcodes don't continue to the next op but instead branch to special labels
                 // they are tightly coupled with the C helper functions
                 // be careful when introducing new paths / updating cpython
-                case YIELD_FROM:
+                case SEND:
+                    abort();
                     // res is the PyObject* returned
                     // res == 0 means error
                     // res == 1 means execute next opcode (=fallthrough)
@@ -5024,7 +4945,6 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 case LOAD_ATTR:
                 case GET_YIELD_FROM_ITER:
                 case BEFORE_ASYNC_WITH:
-                case SETUP_WITH:
                 case LOAD_METHOD:
                 case MAKE_FUNCTION:
                 case FORMAT_VALUE:
@@ -5055,7 +4975,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                     emit_if_res_0_error(Dst);
                     deferred_vs_push(Dst, REGISTER, res_idx);
                     break;
-
+/*
                 case CALL_FUNCTION_EX:
                     // res == 0 means error
                     // all other values are the returned python object
@@ -5067,11 +4987,11 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                     }
 #endif
                     break;
-
+*/
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 10
                 // nothing todo - can't return an error
-                case ROT_N:
-                    break;
+                //case ROT_N:
+                //    break;
 #endif
                 default:
                     // res == 0 means error
@@ -5157,7 +5077,9 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
     // fall through
 
     |->handle_signal_jump_to_inst:
-    emit_load32_mem(Dst, arg1_idx, f_idx, offsetof(PyFrameObject, f_lasti));
+    // TODO f_lasti does not exist...
+    |int3
+    //emit_load32_mem(Dst, arg1_idx, f_idx, offsetof(PyFrameObject, f_lasti));
     emit_mov_inst_addr_to_tmp(Dst, arg1_idx);
     // tmp points now to the beginning of the bytecode implementation
     // but we want to skip the signal check.
@@ -5204,7 +5126,10 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
     // we come here if the result of LOAD_FAST or DELETE_FAST is null
     |->unboundlocal_error:
     // arg1 must be oparg!
-    emit_call_ext_func(Dst, JIT_HELPER_UNBOUNDLOCAL_ERROR);
+    |int3
+    // todo this has to call this:
+    // format_exc_unbound(tstate, frame->f_code, oparg);
+    //emit_call_ext_func(Dst, JIT_HELPER_UNBOUNDLOCAL_ERROR);
     // fallthrough to error
 
     |->error:
@@ -5291,7 +5216,9 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
 
     // in the most common case where f_lasti is < 0 it just fallsthrough to the first opcode
     // in the other cases it will jump to the opcode f_lasti + 2.
-    emit_load32_mem(Dst, arg1_idx, f_idx, offsetof(PyFrameObject, f_lasti));
+    // TODO f_lasti does not exist...
+    |int3
+    //emit_load32_mem(Dst, arg1_idx, f_idx, offsetof(PyFrameObject, f_lasti));
     emit_cmp32_imm(Dst, arg1_idx, 0);
     | branch_ge >1
 
@@ -5306,7 +5233,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
     emit_add_or_sub_imm(Dst, arg1_idx, arg1_idx, 1); // we have to increment the value by one instruction.
 #endif
 
-#if JIT_DEBUG
+#if 0 && JIT_DEBUG
     // generate code to check that the instruction we jump to had 'is_jmp_target' set
     // every entry in the is_jmp_target array is 4 bytes long. 'lasti / 2' is the index
 
@@ -5473,9 +5400,9 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
         PyObject *type, *value, *traceback;
         PyErr_Fetch(&type, &value, &traceback);
 
-        _Py_static_string(PyId_slash, "/");
-        PyObject *slash = _PyUnicode_FromId(&PyId_slash); /* borrowed */
+        PyObject *slash = _PyUnicode_FromASCII("/", 1);
         PyObject *partitioned = PyUnicode_RPartition(co->co_filename, slash);
+        Py_DECREF(slash);
 
         // Function naming: there are a couple ways we can name the functions.
         // Ideally we would have access to the function object, and would do
@@ -5515,6 +5442,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
 
         PyObject* str_newline = PyUnicode_FromString("\n");
         PyObject* str_newline_escaped = PyUnicode_FromString("\\n");
+        PyObject* varnames = PyCode_GetVarnames(co);
         for (int inst_idx = 0; inst_idx < Dst->num_opcodes; ++inst_idx) {
             _Py_CODEUNIT word = Dst->first_instr[inst_idx];
             int opcode = _Py_OPCODE(word);
@@ -5532,7 +5460,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
                 Py_DECREF(str);
                 Py_DECREF(str_escaped);
             } else if (opcode == LOAD_FAST || opcode == STORE_FAST || opcode == DELETE_FAST) {
-                PyObject* name = PyTuple_GET_ITEM(co->co_varnames, oparg | extended_arg);
+                PyObject* name = PyTuple_GET_ITEM(varnames, oparg | extended_arg);
                 fprintf(perf_map_opcode_map, " (%.60s)\n", PyUnicode_AsUTF8(name));
             } else if (opcode == LOAD_ATTR || opcode == STORE_ATTR || opcode == DELETE_ATTR || opcode == LOAD_METHOD || opcode == LOAD_GLOBAL || opcode == LOAD_NAME) {
                 PyObject* name = PyTuple_GET_ITEM(co->co_names, oparg | extended_arg);
@@ -5548,6 +5476,7 @@ void* jit_func(PyCodeObject* co, PyThreadState* tstate) {
         }
         Py_DECREF(str_newline);
         Py_DECREF(str_newline_escaped);
+        Py_DECREF(varnames);
     }
 
     __builtin___clear_cache((char*)mem, &((char*)mem)[size]);
@@ -5607,7 +5536,7 @@ jit_stat_##name##_inline, jit_stat_##name##_total, #opcode, jit_stat_##name##_hi
     PRINT_STAT(load_attr, LOAD_ATTR);
     PRINT_STAT(load_method, LOAD_METHOD);
     PRINT_STAT(load_global, LOAD_GLOBAL);
-    PRINT_STAT(call_method, CALL_METHOD);
+//    PRINT_STAT(call_method, CALL_METHOD);
     PRINT_STAT(store_attr, STORE_ATTR);
 
     fprintf(stderr, "jit: num GetItemLong: %lu inlined: %lu\n", jit_stat_getitemlong, jit_stat_getitemlong_inlined);
@@ -5728,15 +5657,15 @@ void jit_finish() {
 // debugging aid which dumps up to num_frames of the python function call stack
 void dump_pycallstack(int num_frames) {
     PyThreadState *tstate = PyThreadState_GET();
-    PyFrameObject* f = tstate->frame;
+    _PyInterpreterFrame* f = tstate->cframe->current_frame;
     for (int i=0; i<num_frames; ++i) {
         if (!f)
             return;
         PyCodeObject* co = f->f_code;
         fprintf(stderr, "fn: %s:%d %s\n", PyUnicode_AsUTF8(co->co_filename), co->co_firstlineno, PyUnicode_AsUTF8(co->co_name));
-        int byte_offset = f->f_lasti * (2/INST_IDX_TO_LASTI_FACTOR);
-        fprintf(stderr, "    opcode byte offset: %d -> line number: %d\n", byte_offset, PyCode_Addr2Line(co, byte_offset));
-        f = f->f_back;
+        //int byte_offset = f->f_lasti * (2/INST_IDX_TO_LASTI_FACTOR);
+        //fprintf(stderr, "    opcode byte offset: %d -> line number: %d\n", byte_offset, PyCode_Addr2Line(co, byte_offset));
+        f = f->previous;
     }
 }
 #endif
